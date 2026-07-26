@@ -12,8 +12,6 @@ import os
 # ============ КОНФИГ ============
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-TGK_LINK = os.getenv("TGK_LINK", "https://t.me/your_channel")
-TGK_ID = os.getenv("TGK_ID", "@your_channel")
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
@@ -125,7 +123,7 @@ async def start(message: types.Message):
     conn.commit()
     
     if cursor.execute("SELECT user_id FROM captcha WHERE user_id=?", (user_id,)).fetchone():
-        await check_subscription(message)
+        await show_main_menu(message)
         return
     
     correct = random.choice(FRUITS)
@@ -150,37 +148,8 @@ async def handle_captcha(callback: types.CallbackQuery):
     if result:
         await callback.message.edit_text("✅ Капча пройдена!")
         await asyncio.sleep(1)
-        await check_subscription(callback.message)
+        await show_main_menu(callback.message)
     await callback.answer()
-
-# ============ ПОДПИСКА ============
-async def check_subscription(message: types.Message):
-    user_id = message.from_user.id
-    try:
-        member = await bot.get_chat_member(TGK_ID, user_id)
-        if member.status in ["member", "administrator", "creator"]:
-            await show_main_menu(message)
-            return
-    except:
-        pass
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("📢 Подписаться на канал", url=TGK_LINK),
-               InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub"))
-    await message.answer(f"🔒 *Для доступа подпишитесь на канал:*\n{TGK_ID}",
-                         reply_markup=markup, parse_mode="Markdown")
-
-@dp.callback_query_handler(lambda c: c.data == "check_sub")
-async def check_sub_callback(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    try:
-        member = await bot.get_chat_member(TGK_ID, user_id)
-        if member.status in ["member", "administrator", "creator"]:
-            await callback.message.edit_text("✅ Подписка подтверждена!")
-            await show_main_menu(callback.message)
-            return
-    except:
-        pass
-    await callback.answer("❌ Вы не подписаны", show_alert=True)
 
 # ============ ГЛАВНОЕ МЕНЮ ============
 async def show_main_menu(message: types.Message):
@@ -188,14 +157,14 @@ async def show_main_menu(message: types.Message):
     markup.add(InlineKeyboardButton("📦 Купить", callback_data="catalog"),
                InlineKeyboardButton("📋 Мои прокси", callback_data="my_proxies"),
                InlineKeyboardButton("💰 Баланс", callback_data="balance"))
-    await message.answer("🛒 *Добро пожаловать!*", reply_markup=markup, parse_mode="Markdown")
+    await message.answer("🛒 *Добро пожаловать в магазин прокси!*", reply_markup=markup, parse_mode="Markdown")
 
 # ============ КАТАЛОГ ============
 @dp.callback_query_handler(lambda c: c.data == "catalog")
 async def show_catalog(callback: types.CallbackQuery):
     products = cursor.execute("SELECT id, name, description FROM products WHERE is_active=1").fetchall()
     if not products:
-        await callback.message.answer("❌ Товаров нет")
+        await callback.message.answer("❌ Товаров пока нет")
         await callback.answer()
         return
     for p in products:
@@ -217,13 +186,13 @@ async def order_proxy(callback: types.CallbackQuery):
     balance = cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
     balance = balance[0] if balance else 0
     if balance < price:
-        await callback.message.answer(f"❌ Недостаточно средств! Нужно: {price}₽")
+        await callback.message.answer(f"❌ Недостаточно средств! Нужно: {price}₽, у вас: {balance}₽")
         await callback.answer()
         return
     
     proxy = cursor.execute("SELECT id FROM proxies WHERE product_id=? AND is_sold=0 AND is_active=0 LIMIT 1", (product_id,)).fetchone()
     if not proxy:
-        await callback.message.answer("❌ Прокси закончились!")
+        await callback.message.answer("❌ Прокси закончились! Админ скоро добавит.")
         await callback.answer()
         return
     
@@ -235,11 +204,19 @@ async def order_proxy(callback: types.CallbackQuery):
     order_id = cursor.lastrowid
     
     username = callback.from_user.username or "без username"
-    admin_text = (f"🆕 *НОВЫЙ ЗАКАЗ!*\n📦 #{order_id}\n👤 {callback.from_user.full_name} (@{username})\n"
-                  f"🆔 {user_id}\n💰 {price}₽\n⏳ {rent_days} дней\n\n*👉 ОТПРАВЬТЕ ПРОКСИ В ЭТОТ ЧАТ*")
+    admin_text = (f"🆕 *НОВЫЙ ЗАКАЗ!*\n"
+                  f"📦 Заказ: #{order_id}\n"
+                  f"👤 {callback.from_user.full_name} (@{username})\n"
+                  f"🆔 ID: {user_id}\n"
+                  f"💰 Сумма: {price}₽\n"
+                  f"⏳ Срок: {rent_days} дней\n\n"
+                  f"*👉 ПРОСТО ОТПРАВЬТЕ ПРОКСИ В ЭТОТ ЧАТ*")
     await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown")
     
-    await callback.message.answer(f"✅ *Заказ #{order_id} оплачен!*\n⏳ {rent_days} дней\n🔄 Ожидайте выдачи...")
+    await callback.message.answer(f"✅ *Заказ #{order_id} оплачен!*\n\n"
+                                  f"⏳ Срок: {rent_days} дней\n"
+                                  f"🔄 Ожидайте выдачи прокси...\n"
+                                  f"Админ получил уведомление.")
     await callback.answer()
 
 # ============ АДМИН: ВЫДАЧА ПРОКСИ ============
@@ -262,14 +239,17 @@ async def admin_send_proxy(message: types.Message):
     order_id, user_id, rent_days = pending
     proxy = cursor.execute("SELECT id FROM proxies WHERE proxy_data=? AND is_sold=0 AND is_active=0 LIMIT 1", (proxy_data,)).fetchone()
     if not proxy:
-        await message.answer(f"❌ Прокси `{proxy_data}` не найден", parse_mode="Markdown")
+        await message.answer(f"❌ Прокси `{proxy_data}` не найден в базе или уже использован", parse_mode="Markdown")
         return
     
     proxy_id = proxy[0]
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Выдать", callback_data=f"give_{order_id}_{proxy_id}"))
-    await message.answer(f"🔍 Заказ #{order_id}\n👤 {user_id}\n⏳ {rent_days} дней\n📦 `{proxy_data}`",
-                         reply_markup=markup, parse_mode="Markdown")
+    markup.add(InlineKeyboardButton("✅ Подтвердить выдачу", callback_data=f"give_{order_id}_{proxy_id}"))
+    await message.answer(f"🔍 Найден ожидающий заказ #{order_id}\n"
+                         f"👤 ID пользователя: {user_id}\n"
+                         f"⏳ Срок: {rent_days} дней\n"
+                         f"📦 Прокси: `{proxy_data}`\n\n"
+                         f"Нажмите кнопку для выдачи", reply_markup=markup, parse_mode="Markdown")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("give_"))
 async def confirm_give(callback: types.CallbackQuery):
@@ -287,13 +267,26 @@ async def confirm_give(callback: types.CallbackQuery):
     cursor.execute("UPDATE orders SET status='completed' WHERE id=?", (order_id,))
     conn.commit()
     
-    await bot.send_message(user_id,
-        f"🟢 *Прокси выдан!*\n```\n{proxy_data}\n```\n⏳ До {expires.strftime('%d.%m.%Y %H:%M')}\n📅 {rent_days} дней",
-        parse_mode="Markdown")
-    await callback.message.edit_text(f"✅ Выдан!\n📦 `{proxy_data}`\n⏳ {rent_days} дней", parse_mode="Markdown")
+    try:
+        await bot.send_message(user_id,
+            f"🟢 *Прокси выдан!*\n"
+            f"✅ Ваш заказ #{order_id} выполнен!\n\n"
+            f"```\n{proxy_data}\n```\n"
+            f"⏳ Действует до: {expires.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📅 Срок аренды: {rent_days} дней\n"
+            f"⚠️ По истечении времени доступ будет закрыт", parse_mode="Markdown")
+    except:
+        await callback.message.answer(f"❌ Не удалось отправить пользователю")
+        await callback.answer()
+        return
+    
+    await callback.message.edit_text(f"✅ Прокси выдан пользователю!\n"
+                                     f"📦 Данные: `{proxy_data}`\n"
+                                     f"⏳ Срок: {rent_days} дней\n"
+                                     f"📅 До {expires.strftime('%d.%m.%Y %H:%M')}", parse_mode="Markdown")
     await callback.answer()
 
-# ============ ПЕРЕСЫЛКА СООБЩЕНИЙ ============
+# ============ ПЕРЕСЫЛКА СООБЩЕНИЙ ОТ ПОЛЬЗОВАТЕЛЕЙ ============
 @dp.message_handler()
 async def forward_to_admin(message: types.Message):
     if message.from_user.id == ADMIN_ID:
@@ -301,9 +294,12 @@ async def forward_to_admin(message: types.Message):
     pending = cursor.execute("SELECT id FROM orders WHERE user_id=? AND status='pending'", (message.from_user.id,)).fetchone()
     if pending:
         await bot.send_message(ADMIN_ID,
-            f"💬 *От пользователя:*\n👤 {message.from_user.full_name}\n🆔 {message.from_user.id}\n📦 #{pending[0]}\n\n{message.text}",
-            parse_mode="Markdown")
-        await message.answer("✅ Отправлено админу")
+            f"💬 *Сообщение от пользователя:*\n"
+            f"👤 {message.from_user.full_name}\n"
+            f"🆔 {message.from_user.id}\n"
+            f"📦 Заказ #{pending[0]}\n\n"
+            f"📝 {message.text}", parse_mode="Markdown")
+        await message.answer("✅ Сообщение отправлено админу. Ожидайте ответа.")
 
 # ============ ПОЛЬЗОВАТЕЛЬ: МОИ ПРОКСИ ============
 @dp.callback_query_handler(lambda c: c.data == "my_proxies")
@@ -313,21 +309,22 @@ async def my_proxies(callback: types.CallbackQuery):
         WHERE user_id=? AND is_sold=1 ORDER BY expires_at DESC
     """, (callback.from_user.id,)).fetchall()
     if not proxies:
-        await callback.message.answer("📋 Нет прокси")
+        await callback.message.answer("📋 У вас пока нет активных прокси")
         await callback.answer()
         return
     text = "📋 *Ваши прокси:*\n\n"
     for p in proxies[:5]:
-        status = "🟢" if p[2] else "🔴"
+        status = "🟢 Активен" if p[2] else "🔴 Истёк"
         expires = datetime.strptime(p[1], "%Y-%m-%d %H:%M:%S.%f")
-        text += f"{status} До {expires.strftime('%d.%m %H:%M')}\n`{p[0]}`\n\n"
+        text += f"{status} | До {expires.strftime('%d.%m %H:%M')}\n`{p[0]}`\n\n"
     await callback.message.answer(text, parse_mode="Markdown")
     await callback.answer()
 
 @dp.callback_query_handler(lambda c: c.data == "balance")
 async def show_balance(callback: types.CallbackQuery):
     balance = cursor.execute("SELECT balance FROM users WHERE user_id=?", (callback.from_user.id,)).fetchone()
-    await callback.message.answer(f"💰 *Баланс:* {balance[0] if balance else 0}₽", parse_mode="Markdown")
+    await callback.message.answer(f"💰 *Ваш баланс:* {balance[0] if balance else 0}₽\n"
+                                  f"Для пополнения обратитесь к админу", parse_mode="Markdown")
     await callback.answer()
 
 # ============ АДМИН КОМАНДЫ ============
@@ -335,54 +332,98 @@ async def show_balance(callback: types.CallbackQuery):
 async def add_product(message: types.Message):
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        await message.answer("/add <название> <описание>")
+        await message.answer("📦 /add <название> <описание>\nПример: /add USA_IPv4 'Анонимные прокси США'")
         return
     cursor.execute("INSERT INTO products (name, description) VALUES (?, ?)", (args[1], args[2]))
     conn.commit()
-    await message.answer(f"✅ Товар создан! ID: {cursor.lastrowid}")
+    await message.answer(f"✅ Товар создан! ID: {cursor.lastrowid}\nТеперь загрузите прокси через /upload {cursor.lastrowid}")
 
 @dp.message_handler(commands=['upload'], user_id=ADMIN_ID)
 async def upload_proxies(message: types.Message):
     args = message.text.split()
-    if len(args) < 2 or not message.document:
-        await message.answer("/upload <ID_товара> + отправьте файл .txt")
+    if len(args) < 2:
+        await message.answer("📤 /upload <ID_товара> + отправьте файл .txt")
         return
-    product_id = int(args[1])
+    if not message.document:
+        await message.answer("❌ Отправьте файл .txt с прокси (каждая строка - ip:port:login:pass)")
+        return
+    
+    try:
+        product_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ ID товара должен быть числом")
+        return
+    
     file = await bot.get_file(message.document.file_id)
     file_path = f"/tmp/{message.document.file_name}"
     await bot.download_file(file.file_path, file_path)
     with open(file_path, 'r') as f:
         proxies = [line.strip() for line in f if line.strip()]
     count = add_proxy_batch(product_id, proxies)
-    await message.answer(f"✅ Загружено {count} прокси")
+    await message.answer(f"✅ Загружено {count} прокси в товар #{product_id}")
 
 @dp.message_handler(commands=['stock'], user_id=ADMIN_ID)
 async def show_stock(message: types.Message):
     products = cursor.execute("""
-        SELECT p.id, p.name, COUNT(pr.id), SUM(CASE WHEN pr.is_sold=0 AND pr.is_active=0 THEN 1 ELSE 0 END)
-        FROM products p LEFT JOIN proxies pr ON p.id = pr.product_id WHERE p.is_active=1 GROUP BY p.id
+        SELECT p.id, p.name, COUNT(pr.id), 
+        SUM(CASE WHEN pr.is_sold=0 AND pr.is_active=0 THEN 1 ELSE 0 END)
+        FROM products p LEFT JOIN proxies pr ON p.id = pr.product_id 
+        WHERE p.is_active=1 GROUP BY p.id
     """).fetchall()
-    text = "📊 *Склад:*\n" + "\n".join([f"#{p[0]} {p[1]} — {p[2]} всего, {p[3]} свободно" for p in products])
-    await message.answer(text or "❌ Товаров нет", parse_mode="Markdown")
+    if not products:
+        await message.answer("❌ Товаров нет")
+        return
+    text = "📊 *Склад:*\n"
+    for p in products:
+        text += f"#{p[0]} {p[1]} — {p[2]} всего, {p[3] if p[3] else 0} свободно\n"
+    await message.answer(text, parse_mode="Markdown")
 
 @dp.message_handler(commands=['addbalance'], user_id=ADMIN_ID)
 async def add_balance(message: types.Message):
     args = message.text.split()
     if len(args) < 3:
-        await message.answer("/addbalance <user_id> <сумма>")
+        await message.answer("💰 /addbalance <user_id> <сумма>\nПример: /addbalance 123456789 100")
         return
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (float(args[2]), int(args[1])))
+    try:
+        user_id = int(args[1])
+        amount = float(args[2])
+    except ValueError:
+        await message.answer("❌ Неверный формат")
+        return
+    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
     conn.commit()
-    await message.answer(f"✅ Начислено {args[2]}₽")
+    await message.answer(f"✅ Пользователю {user_id} начислено {amount}₽")
 
-# ============ ЗАПУСК ============
-async def deactivate_expired():
+@dp.message_handler(commands=['orders'], user_id=ADMIN_ID)
+async def show_orders(message: types.Message):
+    orders = cursor.execute("""
+        SELECT o.id, u.user_id, u.full_name, o.rent_days, o.created
+        FROM orders o JOIN users u ON o.user_id = u.user_id
+        WHERE o.status = 'pending' ORDER BY o.created ASC
+    """).fetchall()
+    if not orders:
+        await message.answer("❌ Нет ожидающих заказов")
+        return
+    text = "📋 *Ожидающие заказы:*\n\n"
+    for o in orders:
+        text += f"#{o[0]} | {o[2]} (@{o[1]}) | {o[3]} дней | {o[4][:16]}\n"
+    await message.answer(text, parse_mode="Markdown")
+
+# ============ АВТОМАТИЧЕСКАЯ ДЕАКТИВАЦИЯ ============
+async def deactivate_expired_loop():
     while True:
-        deactivate_expired()
+        try:
+            count = deactivate_expired()
+            if count > 0:
+                logging.info(f"Деактивировано {count} истекших прокси")
+        except Exception as e:
+            logging.error(f"Ошибка деактивации: {e}")
         await asyncio.sleep(300)
 
+# ============ ЗАПУСК ============
 async def main():
-    asyncio.create_task(deactivate_expired())
+    logging.info("🚀 Бот запущен!")
+    asyncio.create_task(deactivate_expired_loop())
     await dp.start_polling()
 
 if __name__ == "__main__":
