@@ -336,31 +336,76 @@ async def add_product(message: types.Message):
         return
     cursor.execute("INSERT INTO products (name, description) VALUES (?, ?)", (args[1], args[2]))
     conn.commit()
-    await message.answer(f"✅ Товар создан! ID: {cursor.lastrowid}\nТеперь загрузите прокси через /upload {cursor.lastrowid}")
+    product_id = cursor.lastrowid
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📤 Загрузить прокси", callback_data=f"upload_{product_id}"))
+    
+    await message.answer(f"✅ Товар создан! ID: {product_id}\nНажмите кнопку чтобы загрузить прокси",
+                         reply_markup=markup)
 
-@dp.message_handler(commands=['upload'], user_id=ADMIN_ID)
-async def upload_proxies(message: types.Message):
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("📤 /upload <ID_товара> + отправьте файл .txt")
-        return
-    if not message.document:
-        await message.answer("❌ Отправьте файл .txt с прокси (каждая строка - ip:port:login:pass)")
+@dp.callback_query_handler(lambda c: c.data.startswith("upload_"), user_id=ADMIN_ID)
+async def upload_button(callback: types.CallbackQuery):
+    product_id = int(callback.data.split("_")[1])
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("❌ Отмена", callback_data="cancel_upload"))
+    
+    await callback.message.answer(
+        f"📤 *Загрузка прокси в товар #{product_id}*\n\n"
+        f"1️⃣ Создайте файл `proxies.txt`\n"
+        f"2️⃣ Каждая строка: `ip:port:login:pass`\n"
+        f"3️⃣ Отправьте файл в этот чат\n\n"
+        f"📌 После отправки файла прокси автоматически загрузятся",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    
+    # Сохраняем в памяти какой товар загружаем
+    global uploading_product_id
+    uploading_product_id = product_id
+    await callback.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "cancel_upload", user_id=ADMIN_ID)
+async def cancel_upload(callback: types.CallbackQuery):
+    global uploading_product_id
+    uploading_product_id = None
+    await callback.message.edit_text("❌ Загрузка отменена")
+    await callback.answer()
+
+# Переменная для хранения ID товара при загрузке
+uploading_product_id = None
+
+@dp.message_handler(content_types=['document'], user_id=ADMIN_ID)
+async def handle_upload_file(message: types.Message):
+    global uploading_product_id
+    
+    if uploading_product_id is None:
+        await message.answer("❌ Сначала нажмите кнопку «Загрузить прокси»")
         return
     
-    try:
-        product_id = int(args[1])
-    except ValueError:
-        await message.answer("❌ ID товара должен быть числом")
+    product_id = uploading_product_id
+    
+    if not message.document.file_name.endswith('.txt'):
+        await message.answer("❌ Отправьте файл в формате .txt")
         return
     
     file = await bot.get_file(message.document.file_id)
     file_path = f"/tmp/{message.document.file_name}"
     await bot.download_file(file.file_path, file_path)
+    
     with open(file_path, 'r') as f:
         proxies = [line.strip() for line in f if line.strip()]
+    
+    if not proxies:
+        await message.answer("❌ Файл пустой")
+        return
+    
     count = add_proxy_batch(product_id, proxies)
-    await message.answer(f"✅ Загружено {count} прокси в товар #{product_id}")
+    uploading_product_id = None
+    
+    await message.answer(f"✅ Загружено {count} прокси в товар #{product_id}!\n"
+                         f"📊 Теперь в наличии {count} шт.")
 
 @dp.message_handler(commands=['stock'], user_id=ADMIN_ID)
 async def show_stock(message: types.Message):
@@ -373,9 +418,11 @@ async def show_stock(message: types.Message):
     if not products:
         await message.answer("❌ Товаров нет")
         return
-    text = "📊 *Склад:*\n"
+    text = "📊 *Склад:*\n\n"
     for p in products:
-        text += f"#{p[0]} {p[1]} — {p[2]} всего, {p[3] if p[3] else 0} свободно\n"
+        free = p[3] if p[3] else 0
+        text += f"#{p[0]} {p[1]}\n"
+        text += f"   📦 Всего: {p[2]}, ✅ Свободно: {free}\n\n"
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message_handler(commands=['addbalance'], user_id=ADMIN_ID)
