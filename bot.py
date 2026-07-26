@@ -151,13 +151,219 @@ async def handle_captcha(callback: types.CallbackQuery):
         await show_main_menu(callback.message)
     await callback.answer()
 
-# ============ ГЛАВНОЕ МЕНЮ ============
+# ============ ГЛАВНОЕ МЕНЮ ДЛЯ ПОЛЬЗОВАТЕЛЯ ============
 async def show_main_menu(message: types.Message):
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(InlineKeyboardButton("📦 Купить", callback_data="catalog"),
                InlineKeyboardButton("📋 Мои прокси", callback_data="my_proxies"),
                InlineKeyboardButton("💰 Баланс", callback_data="balance"))
+    
+    # Если админ - показываем админ-панель
+    if message.from_user.id == ADMIN_ID:
+        markup.add(InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel"))
+    
     await message.answer("🛒 *Добро пожаловать в магазин прокси!*", reply_markup=markup, parse_mode="Markdown")
+
+# ============ АДМИН-ПАНЕЛЬ ============
+@dp.callback_query_handler(lambda c: c.data == "admin_panel", user_id=ADMIN_ID)
+async def admin_panel(callback: types.CallbackQuery):
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("📤 Залить прокси", callback_data="upload_menu"),
+        InlineKeyboardButton("📦 Создать товар", callback_data="add_product"),
+        InlineKeyboardButton("📊 Склад", callback_data="stock"),
+        InlineKeyboardButton("📋 Заказы", callback_data="orders"),
+        InlineKeyboardButton("💰 Пополнить баланс", callback_data="add_balance"),
+        InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")
+    )
+    await callback.message.edit_text("⚙️ *Админ-панель*\nВыберите действие:", reply_markup=markup, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "back_to_menu")
+async def back_to_menu(callback: types.CallbackQuery):
+    await show_main_menu(callback.message)
+    await callback.answer()
+
+# ============ КНОПКА "ЗАЛИТЬ ПРОКСИ" ============
+@dp.callback_query_handler(lambda c: c.data == "upload_menu", user_id=ADMIN_ID)
+async def upload_menu(callback: types.CallbackQuery):
+    products = cursor.execute("SELECT id, name FROM products WHERE is_active=1").fetchall()
+    
+    if not products:
+        await callback.message.edit_text("❌ Сначала создайте товар через «Создать товар»")
+        await callback.answer()
+        return
+    
+    markup = InlineKeyboardMarkup(row_width=2)
+    for p in products:
+        markup.add(InlineKeyboardButton(f"📤 {p[1]} (ID:{p[0]})", callback_data=f"upload_file_{p[0]}"))
+    markup.add(InlineKeyboardButton("🔙 Назад", callback_data="admin_panel"))
+    
+    await callback.message.edit_text("📤 *Выберите товар для заливки прокси:*", reply_markup=markup, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("upload_file_"), user_id=ADMIN_ID)
+async def upload_file_button(callback: types.CallbackQuery):
+    product_id = int(callback.data.split("_")[2])
+    
+    global uploading_product_id
+    uploading_product_id = product_id
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("❌ Отмена", callback_data="upload_menu"))
+    
+    await callback.message.edit_text(
+        f"📤 *Загрузка прокси в товар ID:{product_id}*\n\n"
+        f"1️⃣ Создайте файл `proxies.txt`\n"
+        f"2️⃣ Каждая строка: `ip:port:login:pass`\n"
+        f"3️⃣ Отправьте файл в этот чат\n\n"
+        f"📌 После отправки файла прокси автоматически загрузятся",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# ============ ОБРАБОТЧИК ФАЙЛА ============
+uploading_product_id = None
+
+@dp.message_handler(content_types=['document'], user_id=ADMIN_ID)
+async def handle_upload_file(message: types.Message):
+    global uploading_product_id
+    
+    if uploading_product_id is None:
+        await message.answer("❌ Сначала выберите товар через «Залить прокси» в админ-панели")
+        return
+    
+    product_id = uploading_product_id
+    
+    if not message.document.file_name.endswith('.txt'):
+        await message.answer("❌ Отправьте файл в формате .txt")
+        return
+    
+    file = await bot.get_file(message.document.file_id)
+    file_path = f"/tmp/{message.document.file_name}"
+    await bot.download_file(file.file_path, file_path)
+    
+    with open(file_path, 'r') as f:
+        proxies = [line.strip() for line in f if line.strip()]
+    
+    if not proxies:
+        await message.answer("❌ Файл пустой")
+        return
+    
+    count = add_proxy_batch(product_id, proxies)
+    uploading_product_id = None
+    
+    await message.answer(f"✅ Загружено {count} прокси в товар #{product_id}!\n"
+                         f"📊 Теперь в наличии {count} шт.")
+    
+    # Возвращаем в админ-панель
+    await admin_panel(message)
+
+# ============ КНОПКА "СОЗДАТЬ ТОВАР" ============
+@dp.callback_query_handler(lambda c: c.data == "add_product", user_id=ADMIN_ID)
+async def add_product_button(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "📦 *Создание товара*\n\n"
+        "Введите команду:\n"
+        "`/add <название> <описание>`\n\n"
+        "Пример:\n"
+        "`/add USA_IPv4 'Анонимные прокси США'`",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.message_handler(commands=['add'], user_id=ADMIN_ID)
+async def add_product(message: types.Message):
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer("❌ /add <название> <описание>\nПример: /add USA_IPv4 'Анонимные прокси США'")
+        return
+    cursor.execute("INSERT INTO products (name, description) VALUES (?, ?)", (args[1], args[2]))
+    conn.commit()
+    product_id = cursor.lastrowid
+    
+    await message.answer(f"✅ Товар создан! ID: {product_id}\nТеперь залейте прокси через админ-панель")
+
+# ============ КНОПКА "СКЛАД" ============
+@dp.callback_query_handler(lambda c: c.data == "stock", user_id=ADMIN_ID)
+async def show_stock_button(callback: types.CallbackQuery):
+    products = cursor.execute("""
+        SELECT p.id, p.name, COUNT(pr.id), 
+        SUM(CASE WHEN pr.is_sold=0 AND pr.is_active=0 THEN 1 ELSE 0 END)
+        FROM products p LEFT JOIN proxies pr ON p.id = pr.product_id 
+        WHERE p.is_active=1 GROUP BY p.id
+    """).fetchall()
+    
+    if not products:
+        await callback.message.edit_text("❌ Товаров нет")
+        await callback.answer()
+        return
+    
+    text = "📊 *Склад:*\n\n"
+    for p in products:
+        free = p[3] if p[3] else 0
+        text += f"#{p[0]} {p[1]}\n"
+        text += f"   📦 Всего: {p[2]}, ✅ Свободно: {free}\n\n"
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 Назад", callback_data="admin_panel"))
+    
+    await callback.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    await callback.answer()
+
+# ============ КНОПКА "ЗАКАЗЫ" ============
+@dp.callback_query_handler(lambda c: c.data == "orders", user_id=ADMIN_ID)
+async def show_orders_button(callback: types.CallbackQuery):
+    orders = cursor.execute("""
+        SELECT o.id, u.user_id, u.full_name, o.rent_days, o.created
+        FROM orders o JOIN users u ON o.user_id = u.user_id
+        WHERE o.status = 'pending' ORDER BY o.created ASC
+    """).fetchall()
+    
+    if not orders:
+        await callback.message.edit_text("❌ Нет ожидающих заказов")
+        await callback.answer()
+        return
+    
+    text = "📋 *Ожидающие заказы:*\n\n"
+    for o in orders:
+        text += f"#{o[0]} | {o[2]} | {o[3]} дней | {o[4][:16]}\n"
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 Назад", callback_data="admin_panel"))
+    
+    await callback.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    await callback.answer()
+
+# ============ КНОПКА "ПОПОЛНИТЬ БАЛАНС" ============
+@dp.callback_query_handler(lambda c: c.data == "add_balance", user_id=ADMIN_ID)
+async def add_balance_button(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "💰 *Пополнение баланса*\n\n"
+        "Введите команду:\n"
+        "`/addbalance <user_id> <сумма>`\n\n"
+        "Пример:\n"
+        "`/addbalance 123456789 100`",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.message_handler(commands=['addbalance'], user_id=ADMIN_ID)
+async def add_balance(message: types.Message):
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("❌ /addbalance <user_id> <сумма>\nПример: /addbalance 123456789 100")
+        return
+    try:
+        user_id = int(args[1])
+        amount = float(args[2])
+    except ValueError:
+        await message.answer("❌ Неверный формат")
+        return
+    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+    await message.answer(f"✅ Пользователю {user_id} начислено {amount}₽")
 
 # ============ КАТАЛОГ ============
 @dp.callback_query_handler(lambda c: c.data == "catalog")
@@ -326,135 +532,6 @@ async def show_balance(callback: types.CallbackQuery):
     await callback.message.answer(f"💰 *Ваш баланс:* {balance[0] if balance else 0}₽\n"
                                   f"Для пополнения обратитесь к админу", parse_mode="Markdown")
     await callback.answer()
-
-# ============ АДМИН КОМАНДЫ ============
-@dp.message_handler(commands=['add'], user_id=ADMIN_ID)
-async def add_product(message: types.Message):
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
-        await message.answer("📦 /add <название> <описание>\nПример: /add USA_IPv4 'Анонимные прокси США'")
-        return
-    cursor.execute("INSERT INTO products (name, description) VALUES (?, ?)", (args[1], args[2]))
-    conn.commit()
-    product_id = cursor.lastrowid
-    
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("📤 Загрузить прокси", callback_data=f"upload_{product_id}"))
-    
-    await message.answer(f"✅ Товар создан! ID: {product_id}\nНажмите кнопку чтобы загрузить прокси",
-                         reply_markup=markup)
-
-@dp.callback_query_handler(lambda c: c.data.startswith("upload_"), user_id=ADMIN_ID)
-async def upload_button(callback: types.CallbackQuery):
-    product_id = int(callback.data.split("_")[1])
-    
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("❌ Отмена", callback_data="cancel_upload"))
-    
-    await callback.message.answer(
-        f"📤 *Загрузка прокси в товар #{product_id}*\n\n"
-        f"1️⃣ Создайте файл `proxies.txt`\n"
-        f"2️⃣ Каждая строка: `ip:port:login:pass`\n"
-        f"3️⃣ Отправьте файл в этот чат\n\n"
-        f"📌 После отправки файла прокси автоматически загрузятся",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-    
-    # Сохраняем в памяти какой товар загружаем
-    global uploading_product_id
-    uploading_product_id = product_id
-    await callback.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "cancel_upload", user_id=ADMIN_ID)
-async def cancel_upload(callback: types.CallbackQuery):
-    global uploading_product_id
-    uploading_product_id = None
-    await callback.message.edit_text("❌ Загрузка отменена")
-    await callback.answer()
-
-# Переменная для хранения ID товара при загрузке
-uploading_product_id = None
-
-@dp.message_handler(content_types=['document'], user_id=ADMIN_ID)
-async def handle_upload_file(message: types.Message):
-    global uploading_product_id
-    
-    if uploading_product_id is None:
-        await message.answer("❌ Сначала нажмите кнопку «Загрузить прокси»")
-        return
-    
-    product_id = uploading_product_id
-    
-    if not message.document.file_name.endswith('.txt'):
-        await message.answer("❌ Отправьте файл в формате .txt")
-        return
-    
-    file = await bot.get_file(message.document.file_id)
-    file_path = f"/tmp/{message.document.file_name}"
-    await bot.download_file(file.file_path, file_path)
-    
-    with open(file_path, 'r') as f:
-        proxies = [line.strip() for line in f if line.strip()]
-    
-    if not proxies:
-        await message.answer("❌ Файл пустой")
-        return
-    
-    count = add_proxy_batch(product_id, proxies)
-    uploading_product_id = None
-    
-    await message.answer(f"✅ Загружено {count} прокси в товар #{product_id}!\n"
-                         f"📊 Теперь в наличии {count} шт.")
-
-@dp.message_handler(commands=['stock'], user_id=ADMIN_ID)
-async def show_stock(message: types.Message):
-    products = cursor.execute("""
-        SELECT p.id, p.name, COUNT(pr.id), 
-        SUM(CASE WHEN pr.is_sold=0 AND pr.is_active=0 THEN 1 ELSE 0 END)
-        FROM products p LEFT JOIN proxies pr ON p.id = pr.product_id 
-        WHERE p.is_active=1 GROUP BY p.id
-    """).fetchall()
-    if not products:
-        await message.answer("❌ Товаров нет")
-        return
-    text = "📊 *Склад:*\n\n"
-    for p in products:
-        free = p[3] if p[3] else 0
-        text += f"#{p[0]} {p[1]}\n"
-        text += f"   📦 Всего: {p[2]}, ✅ Свободно: {free}\n\n"
-    await message.answer(text, parse_mode="Markdown")
-
-@dp.message_handler(commands=['addbalance'], user_id=ADMIN_ID)
-async def add_balance(message: types.Message):
-    args = message.text.split()
-    if len(args) < 3:
-        await message.answer("💰 /addbalance <user_id> <сумма>\nПример: /addbalance 123456789 100")
-        return
-    try:
-        user_id = int(args[1])
-        amount = float(args[2])
-    except ValueError:
-        await message.answer("❌ Неверный формат")
-        return
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
-    conn.commit()
-    await message.answer(f"✅ Пользователю {user_id} начислено {amount}₽")
-
-@dp.message_handler(commands=['orders'], user_id=ADMIN_ID)
-async def show_orders(message: types.Message):
-    orders = cursor.execute("""
-        SELECT o.id, u.user_id, u.full_name, o.rent_days, o.created
-        FROM orders o JOIN users u ON o.user_id = u.user_id
-        WHERE o.status = 'pending' ORDER BY o.created ASC
-    """).fetchall()
-    if not orders:
-        await message.answer("❌ Нет ожидающих заказов")
-        return
-    text = "📋 *Ожидающие заказы:*\n\n"
-    for o in orders:
-        text += f"#{o[0]} | {o[2]} (@{o[1]}) | {o[3]} дней | {o[4][:16]}\n"
-    await message.answer(text, parse_mode="Markdown")
 
 # ============ АВТОМАТИЧЕСКАЯ ДЕАКТИВАЦИЯ ============
 async def deactivate_expired_loop():
